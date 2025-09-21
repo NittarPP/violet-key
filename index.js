@@ -36,7 +36,7 @@ app.use(express.json());
 app.post('/register', async (req, res) => {
     const { key, uuid, hwid } = req.body;
     if (!key || !uuid || !hwid)
-        return res.status(400).json({ status: 'error', message: 'Missing key, uuid, or hwid' });
+        return res.status(400).json({ status: 'error', message: 'Missing key, uuid' });
 
     const result = await db.query('SELECT * FROM Violet_SQL WHERE key=$1', [key]);
     if (result.rowCount === 0)
@@ -44,16 +44,16 @@ app.post('/register', async (req, res) => {
 
     const record = result.rows[0];
 
-    if (record.uuid && record.hwid) {
-        if (record.uuid !== uuid || record.hwid !== hwid) {
-            console.log(`[SECURITY] HWID/UUID mismatch for key ${key}`);
-            return res.status(403).json({ status: 'error', message: 'HWID/UUID mismatch! Kick the player.' });
+    if (record.uuid) {
+        if (record.uuid !== uuid) {
+            console.log(`[SECURITY] UUID mismatch for key ${key}`);
+            return res.status(403).json({ status: 'error', message: 'UUID mismatch! Kick the player.' });
         }
     }
 
     await db.query('UPDATE Violet_SQL SET uuid=$1, hwid=$2 WHERE key=$3', [uuid, hwid, key]);
     console.log(`[REGISTERED] Key ${key} registered by UUID: ${uuid}, HWID: ${hwid}`);
-    res.json({ status: 'success', message: 'UUID/HWID registered!' });
+    res.json({ status: 'success', message: 'UUID registered!' });
 });
 
 app.listen(PORT, () => console.log(`Express server running on port ${PORT}`));
