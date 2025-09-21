@@ -1,24 +1,24 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, SlashCommandBuilder, REST, Routes, ActionRowBuilder, ButtonBuilder, ButtonStyle, EmbedBuilder } = require('discord.js');
-const { Client: PGClient } = require('pg');
+const { Pool } = require('pg'); // Use Pool for concurrency
 const express = require('express');
+const crypto = require('crypto');
 
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
 const PG_CONNECTION_STRING = process.env.PG_CONNECTION_STRING;
 const PORT = process.env.PORT || 5000;
 
 // -------------------- POSTGRES DB --------------------
-const db = new PGClient({
+const db = new Pool({
     connectionString: PG_CONNECTION_STRING,
     ssl: { rejectUnauthorized: false }
 });
 
 async function initDB() {
-    await db.connect();
     await db.query(`
         CREATE TABLE IF NOT EXISTS Violet_SQL (
             id SERIAL PRIMARY KEY,
-            discord_user VARCHAR(50) NOT NULL,
+            discord_user VARCHAR(50) NOT NULL UNIQUE,
             key VARCHAR(100) NOT NULL UNIQUE,
             hwid VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -27,6 +27,41 @@ async function initDB() {
     console.log("Database ready!");
 }
 initDB().catch(console.error);
+
+// -------------------- HELPERS --------------------
+function generateKey() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+    let key = '';
+    for (let i = 0; i < 32; i++) key += chars.charAt(Math.floor(Math.random() * chars.length));
+    return `Violet-Hub-${key}`;
+}
+
+async function getOrCreateKey(discordUserId) {
+    // Check if user already has a key
+    const existing = await db.query('SELECT key FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
+    if (existing.rowCount > 0) return existing.rows[0].key;
+
+    // Generate unique key
+    let key;
+    let exists = { rowCount: 1 };
+    while (exists.rowCount > 0) {
+        key = generateKey();
+        exists = await db.query('SELECT key FROM Violet_SQL WHERE key=$1', [key]);
+    }
+
+    // Insert only once
+    await db.query('INSERT INTO Violet_SQL (discord_user, key) VALUES ($1, $2) ON CONFLICT (discord_user) DO NOTHING', [discordUserId, key]);
+    return key;
+}
+
+async function notifyUserRegistration(discordUserId, hwid) {
+    try {
+        const user = await bot.users.fetch(discordUserId);
+        await user.send(`✅ Your key is now registered!\nHWID: ${hwid}`);
+    } catch (err) {
+        console.error('Failed to DM user:', err);
+    }
+}
 
 // -------------------- EXPRESS SERVER --------------------
 const app = express();
@@ -47,11 +82,20 @@ app.post('/register', async (req, res) => {
         if (record.hwid !== hwid) {
             console.log(`[SECURITY] HWID mismatch for key ${key}`);
             return res.status(403).json({ status: 'error', message: 'HWID mismatch! Kick the player.' });
+        } else {
+            return res.json({ status: 'success', message: 'HWID already registered.' });
         }
     }
 
+    // Update HWID and notify user
     await db.query('UPDATE Violet_SQL SET hwid=$1 WHERE key=$2', [hwid, key]);
     console.log(`[REGISTERED] Key ${key} registered by HWID: ${hwid}`);
+
+    // Notify user via Discord
+    if (record.discord_user) {
+        notifyUserRegistration(record.discord_user, hwid);
+    }
+
     res.json({ status: 'success', message: 'HWID registered!' });
 });
 
@@ -77,45 +121,6 @@ bot.once('ready', async () => {
     console.log('Slash commands registered!');
 });
 
-// -------------------- HELPERS --------------------
-function generateKey() {
-    let key = '';
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    for (let i = 0; i < 32; i++) key += chars.charAt(Math.floor(Math.random() * chars.length));
-    return `Violet-Hub-${key}`;
-}
-
-async function getOrCreateKey(discordUserId) {
-    const existing = await db.query('SELECT key FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
-    if (existing.rowCount > 0) return existing.rows[0].key;
-
-    while (true) {
-        const key = generateKey();
-        const exists = await db.query('SELECT key FROM Violet_SQL WHERE key=$1', [key]);
-        if (exists.rowCount === 0) {
-            await db.query('INSERT INTO Violet_SQL (discord_user, key) VALUES ($1, $2)', [discordUserId, key]);
-            return key;
-        }
-    }
-}
-
-// Wait for registration and DM user
-async function waitForRegistration(key, discordUserId) {
-    while (true) {
-        const res = await db.query('SELECT hwid FROM Violet_SQL WHERE key=$1', [key]);
-        if (res.rows[0] && res.rows[0].hwid) {
-            try {
-                const user = await bot.users.fetch(discordUserId);
-                await user.send(`✅ Your key is now registered!\nHWID: ${res.rows[0].hwid}`);
-            } catch (err) {
-                console.error('Failed to DM user:', err);
-            }
-            return res.rows[0];
-        }
-        await new Promise(r => setTimeout(r, 3000));
-    }
-}
-
 // -------------------- DISCORD INTERACTIONS --------------------
 bot.on('interactionCreate', async interaction => {
     if (interaction.isChatInputCommand()) {
@@ -127,8 +132,6 @@ bot.on('interactionCreate', async interaction => {
                 .addFields({ name: 'Key', value: `\`${key}\`` })
                 .setColor('Random');
             await interaction.reply({ embeds: [embed], ephemeral: true });
-
-            waitForRegistration(key, interaction.user.id);
         } else if (interaction.commandName === 'keymaker') {
             const button = new ButtonBuilder()
                 .setCustomId('public_key_button')
@@ -151,8 +154,6 @@ bot.on('interactionCreate', async interaction => {
             try {
                 await interaction.user.send(`✅ Here is your Violet-Hub key:\n\`${key}\``);
                 await interaction.reply({ content: '✅ Check your DMs for the key!', ephemeral: true });
-
-                waitForRegistration(key, interaction.user.id);
             } catch (err) {
                 console.error('Failed to DM user:', err);
                 await interaction.reply({ content: '❌ Could not send DM. Please make sure DMs are enabled.', ephemeral: true });
