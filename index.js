@@ -32,6 +32,21 @@ initDB().catch(console.error);
 const app = express();
 app.use(express.json());
 
+app.get('/register', (req, res) => {
+    res.send(`
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <title>Violet Key</title>
+        </head>
+        <body>
+            <h1>Hello Skid</h1>
+        </body>
+        </html>
+    `);
+});
+
 app.post('/register', async (req, res) => {
     const { key, uuid } = req.body;
     if (!key || !uuid)
@@ -162,3 +177,4 @@ bot.on('interactionCreate', async interaction => {
 });
 
 bot.login(DISCORD_TOKEN);
+
