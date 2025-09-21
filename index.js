@@ -21,7 +21,6 @@ async function initDB() {
             discord_user VARCHAR(50) NOT NULL,
             key VARCHAR(100) NOT NULL UNIQUE,
             uuid VARCHAR(100),
-            hwid VARCHAR(100),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
@@ -34,9 +33,9 @@ const app = express();
 app.use(express.json());
 
 app.post('/register', async (req, res) => {
-    const { key, uuid, hwid } = req.body;
-    if (!key || !uuid || !hwid)
-        return res.status(400).json({ status: 'error', message: 'Missing key, uuid' });
+    const { key, uuid } = req.body;
+    if (!key || !uuid)
+        return res.status(400).json({ status: 'error', message: 'Missing key or uuid' });
 
     const result = await db.query('SELECT * FROM Violet_SQL WHERE key=$1', [key]);
     if (result.rowCount === 0)
@@ -51,8 +50,8 @@ app.post('/register', async (req, res) => {
         }
     }
 
-    await db.query('UPDATE Violet_SQL SET uuid=$1, hwid=$2 WHERE key=$3', [uuid, hwid, key]);
-    console.log(`[REGISTERED] Key ${key} registered by UUID: ${uuid}, HWID: ${hwid}`);
+    await db.query('UPDATE Violet_SQL SET uuid=$1 WHERE key=$2', [uuid, key]);
+    console.log(`[REGISTERED] Key ${key} registered by UUID: ${uuid}`);
     res.json({ status: 'success', message: 'UUID registered!' });
 });
 
@@ -82,9 +81,7 @@ bot.once('ready', async () => {
 function generateKey() {
     let key = '';
     const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    for (let i = 0; i < 32; i++) {
-        key += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
+    for (let i = 0; i < 32; i++) key += chars.charAt(Math.floor(Math.random() * chars.length));
     return `Violet-Hub-${key}`;
 }
 
@@ -105,11 +102,11 @@ async function getOrCreateKey(discordUserId) {
 // Wait for registration and DM user
 async function waitForRegistration(key, discordUserId) {
     while (true) {
-        const res = await db.query('SELECT uuid, hwid FROM Violet_SQL WHERE key=$1', [key]);
-        if (res.rows[0] && res.rows[0].uuid && res.rows[0].hwid) {
+        const res = await db.query('SELECT uuid FROM Violet_SQL WHERE key=$1', [key]);
+        if (res.rows[0] && res.rows[0].uuid) {
             try {
                 const user = await bot.users.fetch(discordUserId);
-                await user.send(`✅ Your key is now registered!\nUUID: ${res.rows[0].uuid}\nHWID: ${res.rows[0].hwid}`);
+                await user.send(`✅ Your key is now registered!\nUUID: ${res.rows[0].uuid}`);
             } catch (err) {
                 console.error('Failed to DM user:', err);
             }
@@ -132,9 +129,7 @@ bot.on('interactionCreate', async interaction => {
             await interaction.reply({ embeds: [embed], ephemeral: true });
 
             waitForRegistration(key, interaction.user.id);
-        }
-
-        else if (interaction.commandName === 'keymaker') {
+        } else if (interaction.commandName === 'keymaker') {
             const button = new ButtonBuilder()
                 .setCustomId('public_key_button')
                 .setLabel('Click to get a key!')
@@ -149,9 +144,7 @@ bot.on('interactionCreate', async interaction => {
 
             await interaction.reply({ embeds: [embed], components: [row] });
         }
-    }
-
-    else if (interaction.isButton()) {
+    } else if (interaction.isButton()) {
         if (interaction.customId === 'public_key_button') {
             const key = await getOrCreateKey(interaction.user.id);
 
