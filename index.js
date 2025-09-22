@@ -21,7 +21,8 @@ async function initDB() {
             discord_user VARCHAR(50) NOT NULL UNIQUE,
             key VARCHAR(100) NOT NULL UNIQUE,
             hwid VARCHAR(100),
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            notified BOOLEAN DEFAULT FALSE
         )
     `);
     console.log("Database ready!");
@@ -37,11 +38,26 @@ function generateKey() {
 }
 
 async function getOrCreateKey(discordUserId) {
-    // Check if user already has a key
-    const existing = await db.query('SELECT key FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
-    if (existing.rowCount > 0) return existing.rows[0].key;
+    const existing = await db.query('SELECT key, created_at FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
 
-    // Generate unique key
+    if (existing.rowCount > 0) {
+        const row = existing.rows[0];
+        const createdAt = row.created_at;
+        const now = new Date();
+
+        // Reactivate key if older than 1 day
+        if (now - createdAt >= 24 * 60 * 60 * 1000) {
+            await db.query(
+                'UPDATE Violet_SQL SET created_at = NOW(), notified = FALSE WHERE discord_user=$1',
+                [discordUserId]
+            );
+            console.log(`Reactivated old key for ${discordUserId}`);
+        }
+
+        return row.key;
+    }
+
+    // Generate a new key
     let key;
     let exists = { rowCount: 1 };
     while (exists.rowCount > 0) {
@@ -49,8 +65,10 @@ async function getOrCreateKey(discordUserId) {
         exists = await db.query('SELECT key FROM Violet_SQL WHERE key=$1', [key]);
     }
 
-    // Insert only once
-    await db.query('INSERT INTO Violet_SQL (discord_user, key) VALUES ($1, $2) ON CONFLICT (discord_user) DO NOTHING', [discordUserId, key]);
+    await db.query(
+        'INSERT INTO Violet_SQL (discord_user, key) VALUES ($1, $2)',
+        [discordUserId, key]
+    );
     return key;
 }
 
@@ -78,6 +96,12 @@ app.post('/register', async (req, res) => {
 
     const record = result.rows[0];
 
+    // Reject if key is inactive (older than 1 day)
+    const createdAt = new Date(record.created_at);
+    if (new Date() - createdAt >= 24 * 60 * 60 * 1000) {
+        return res.status(403).json({ status: 'error', message: 'Key is expired. Click "get key" to reactivate it.' });
+    }
+
     if (record.hwid) {
         if (record.hwid !== hwid) {
             console.log(`[SECURITY] HWID mismatch for key ${key}`);
@@ -91,7 +115,6 @@ app.post('/register', async (req, res) => {
     await db.query('UPDATE Violet_SQL SET hwid=$1 WHERE key=$2', [hwid, key]);
     console.log(`[REGISTERED] Key ${key} registered by HWID: ${hwid}`);
 
-    // Notify user via Discord
     if (record.discord_user) {
         notifyUserRegistration(record.discord_user, hwid);
     }
@@ -164,30 +187,46 @@ bot.on('interactionCreate', async interaction => {
 
 setInterval(async () => {
   try {
+    // Reset 'notified' for keys older than 23 hours (so they can be notified again when expired)
+    await db.query(`
+      UPDATE Violet_SQL
+      SET notified = FALSE
+      WHERE created_at < NOW() - INTERVAL '23 hours'
+        AND notified = TRUE
+    `);
+  } catch (err) {
+    console.error('Error resetting notified flags:', err);
+  }
+}, 60 * 60 * 1000); // run every 1 hour
+
+
+setInterval(async () => {
+  try {
     const oldRows = await db.query(`
-      SELECT id, discord_user, key 
+      SELECT id, discord_user, key
       FROM Violet_SQL
-      WHERE created_at < NOW() - INTERVAL '1 day';
+      WHERE created_at < NOW() - INTERVAL '1 day'
+        AND notified = FALSE
     `);
 
     for (const row of oldRows.rows) {
       try {
         if (row.discord_user) {
           const user = await bot.users.fetch(row.discord_user);
-          await user.send(`⚠️ Your Violet-Hub key (\`${row.key}\`) was deleted because it was older than 1 day.`);
+          await user.send(`⚠️ Your Violet-Hub key (\`${row.key}\`) is now inactive because it’s older than 1 day. Click "get key" to reactivate it.`);
         }
+
+        // Mark as notified
+        await db.query('UPDATE Violet_SQL SET notified = TRUE WHERE id=$1', [row.id]);
+        console.log(`Notified user ${row.discord_user} about expired key ${row.key}`);
       } catch (err) {
         console.error(`Failed to DM user ${row.discord_user}:`, err);
       }
-
-      await db.query('DELETE FROM Violet_SQL WHERE id=$1', [row.id]);
-      console.log(`Deleted key ${row.key} for user ${row.discord_user}`);
     }
-
   } catch (err) {
-    console.error('Error in auto-delete loop:', err);
+    console.error('Error in auto-notify loop:', err);
   }
-}, 1000);
+}, 1000); // every 1 second
+
 
 bot.login(DISCORD_TOKEN);
-
