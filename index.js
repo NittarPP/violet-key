@@ -162,4 +162,32 @@ bot.on('interactionCreate', async interaction => {
     }
 });
 
+setInterval(async () => {
+  try {
+    const oldRows = await db.query(`
+      SELECT id, discord_user, key 
+      FROM Violet_SQL
+      WHERE created_at < NOW() - INTERVAL '1 day';
+    `);
+
+    for (const row of oldRows.rows) {
+      try {
+        if (row.discord_user) {
+          const user = await bot.users.fetch(row.discord_user);
+          await user.send(`⚠️ Your Violet-Hub key (\`${row.key}\`) was deleted because it was older than 1 day.`);
+        }
+      } catch (err) {
+        console.error(`Failed to DM user ${row.discord_user}:`, err);
+      }
+
+      await db.query('DELETE FROM Violet_SQL WHERE id=$1', [row.id]);
+      console.log(`Deleted key ${row.key} for user ${row.discord_user}`);
+    }
+
+  } catch (err) {
+    console.error('Error in auto-delete loop:', err);
+  }
+}, 1000);
+
 bot.login(DISCORD_TOKEN);
+
