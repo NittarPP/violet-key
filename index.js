@@ -38,26 +38,26 @@ function generateKey() {
 }
 
 async function getOrCreateKey(discordUserId) {
-    const existing = await db.query('SELECT key, created_at FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
+    // Try to fetch existing key
+    let existing = await db.query('SELECT key, created_at FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
 
     if (existing.rowCount > 0) {
         const row = existing.rows[0];
         const createdAt = row.created_at;
         const now = new Date();
 
-        // Reactivate key if older than 1 day
+        // Reactivate if older than 1 day
         if (now - createdAt >= 24 * 60 * 60 * 1000) {
             await db.query(
                 'UPDATE Violet_SQL SET created_at = NOW(), notified = FALSE WHERE discord_user=$1',
                 [discordUserId]
             );
-            console.log(`Reactivated old key for ${discordUserId}`);
         }
 
         return row.key;
     }
 
-    // Generate a new key
+    // Generate unique key
     let key;
     let exists = { rowCount: 1 };
     while (exists.rowCount > 0) {
@@ -65,12 +65,17 @@ async function getOrCreateKey(discordUserId) {
         exists = await db.query('SELECT key FROM Violet_SQL WHERE key=$1', [key]);
     }
 
+    // Insert key safely (do nothing if user already exists)
     await db.query(
-        'INSERT INTO Violet_SQL (discord_user, key) VALUES ($1, $2)',
+        'INSERT INTO Violet_SQL (discord_user, key) VALUES ($1, $2) ON CONFLICT (discord_user) DO NOTHING',
         [discordUserId, key]
     );
-    return key;
+
+    // Fetch again to ensure only one key
+    existing = await db.query('SELECT key FROM Violet_SQL WHERE discord_user=$1', [discordUserId]);
+    return existing.rows[0].key;
 }
+
 
 async function notifyUserRegistration(discordUserId, hwid) {
     try {
@@ -230,3 +235,4 @@ setInterval(async () => {
 
 
 bot.login(DISCORD_TOKEN);
+
